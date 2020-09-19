@@ -17,84 +17,109 @@
 package com.codelab.android.datastore.data
 
 import android.content.Context
+import android.util.Log
 import androidx.core.content.edit
+import androidx.datastore.DataStore
+import androidx.datastore.createDataStore
+import androidx.datastore.migrations.SharedPreferencesMigration
+import androidx.datastore.migrations.SharedPreferencesView
+import com.codelab.android.datastore.UserPreferences
+import com.codelab.android.datastore.UserPreferences.SortOrder
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.catch
+import java.io.IOException
 
 private const val USER_PREFERENCES_NAME = "user_preferences"
 private const val SORT_ORDER_KEY = "sort_order"
-
-enum class SortOrder {
-    NONE,
-    BY_DEADLINE,
-    BY_PRIORITY,
-    BY_DEADLINE_AND_PRIORITY
-}
 
 /**
  * Class that handles saving and retrieving user preferences
  */
 class UserPreferencesRepository(context: Context) {
 
-    private val sharedPreferences =
-        context.applicationContext.getSharedPreferences(USER_PREFERENCES_NAME, Context.MODE_PRIVATE)
+    companion object {
+        private const val TAG: String = "UserPreferencesRepo"
+    }
 
-    // Keep the sort order as a stream of changes
-    private val _sortOrderFlow = MutableStateFlow(sortOrder)
-    val sortOrderFlow: StateFlow<SortOrder> = _sortOrderFlow
+    private val sharedPrefsMigration = SharedPreferencesMigration(
+        context,
+        USER_PREFERENCES_NAME
+    ) { sharedPrefs: SharedPreferencesView, currentData: UserPreferences ->
+        // Define the mapping from SharedPreferences to UserPreferences
+        if (currentData.sortOrder == SortOrder.UNSPECIFIED) {
+            currentData.toBuilder().setSortOrder(
+                SortOrder.valueOf(sharedPrefs.getString(SORT_ORDER_KEY, SortOrder.NONE.name)!!)
+            ).build()
+        } else {
+            currentData
+        }
+    }
 
-    /**
-     * Get the sort order. By default, sort order is None.
-     */
-    private val sortOrder: SortOrder
-        get() {
-            val order = sharedPreferences.getString(SORT_ORDER_KEY, SortOrder.NONE.name)
-            return SortOrder.valueOf(order ?: SortOrder.NONE.name)
+    private val dataStore: DataStore<UserPreferences> =
+        context.createDataStore(
+            fileName = "user_prefs.pb",
+            serializer = UserPreferencesSerializer,
+            migrations = listOf(sharedPrefsMigration)
+        )
+
+    val userPreferencesFlow: Flow<UserPreferences> = dataStore.data
+        .catch { exception ->
+            // dataStore.data throws an IOException when an error is encountered when reading data
+            if (exception is IOException) {
+                Log.e(TAG, "Error reading sort order preferences.", exception)
+                emit(UserPreferences.getDefaultInstance())
+            } else {
+                throw exception
+            }
         }
 
-    fun enableSortByDeadline(enable: Boolean) {
-        val currentOrder = sortOrderFlow.value
-        val newSortOrder =
-            if (enable) {
-                if (currentOrder == SortOrder.BY_PRIORITY) {
-                    SortOrder.BY_DEADLINE_AND_PRIORITY
-                } else {
-                    SortOrder.BY_DEADLINE
-                }
-            } else {
-                if (currentOrder == SortOrder.BY_DEADLINE_AND_PRIORITY) {
-                    SortOrder.BY_PRIORITY
-                } else {
-                    SortOrder.NONE
-                }
-            }
-        updateSortOrder(newSortOrder)
-        _sortOrderFlow.value = newSortOrder
+    suspend fun updateShowCompleted(completed: Boolean) {
+        dataStore.updateData { preferences ->
+            preferences.toBuilder().setShowCompleted(completed).build()
+        }
     }
 
-    fun enableSortByPriority(enable: Boolean) {
-        val currentOrder = sortOrderFlow.value
-        val newSortOrder =
-            if (enable) {
-                if (currentOrder == SortOrder.BY_DEADLINE) {
-                    SortOrder.BY_DEADLINE_AND_PRIORITY
+    suspend fun enableSortByDeadline(enable: Boolean) {
+        dataStore.updateData { preferences ->
+            val currentOrder = preferences.sortOrder
+            val newSortOrder =
+                if (enable) {
+                    if (currentOrder == SortOrder.BY_PRIORITY) {
+                        SortOrder.BY_DEADLINE_AND_PRIORITY
+                    } else {
+                        SortOrder.BY_DEADLINE
+                    }
                 } else {
-                    SortOrder.BY_PRIORITY
+                    if (currentOrder == SortOrder.BY_DEADLINE_AND_PRIORITY) {
+                        SortOrder.BY_PRIORITY
+                    } else {
+                        SortOrder.NONE
+                    }
                 }
-            } else {
-                if (currentOrder == SortOrder.BY_DEADLINE_AND_PRIORITY) {
-                    SortOrder.BY_DEADLINE
-                } else {
-                    SortOrder.NONE
-                }
-            }
-        updateSortOrder(newSortOrder)
-        _sortOrderFlow.value = newSortOrder
+            preferences.toBuilder().setSortOrder(newSortOrder).build()
+        }
     }
 
-    private fun updateSortOrder(sortOrder: SortOrder) {
-        sharedPreferences.edit {
-            putString(SORT_ORDER_KEY, sortOrder.name)
+    suspend fun enableSortByPriority(enable: Boolean) {
+        dataStore.updateData { preferences ->
+            val currentOrder = preferences.sortOrder
+            val newSortOrder =
+                if (enable) {
+                    if (currentOrder == SortOrder.BY_DEADLINE) {
+                        SortOrder.BY_DEADLINE_AND_PRIORITY
+                    } else {
+                        SortOrder.BY_PRIORITY
+                    }
+                } else {
+                    if (currentOrder == SortOrder.BY_DEADLINE_AND_PRIORITY) {
+                        SortOrder.BY_DEADLINE
+                    } else {
+                        SortOrder.NONE
+                    }
+                }
+            preferences.toBuilder().setSortOrder(newSortOrder).build()
         }
     }
 }
